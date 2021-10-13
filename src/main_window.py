@@ -42,8 +42,6 @@ class HKLViewer(QtWidgets.QMainWindow):
             self.reciprocal_motors[name.split('_')[1]] = address.strip('(tango://').strip(')')
 
         self.motors = [name.split('  ')[0] for name in PyTango.DeviceProxy(self.diffrac).motorlist]
-        #TODO TEMP
-        self.motors = ['omega_t', 'mu', 'omega', 'chi', 'phi', 'gamma', 'delta']
 
         self.real_trajectory = None
 
@@ -356,12 +354,17 @@ class HKLViewer(QtWidgets.QMainWindow):
 
     # ----------------------------------------------------------------------
     def save_script(self):
-        file_name = QtWidgets.QFileDialog.getSaveFileName(self, 'File name', '/home/p23user/sardanaMacros/script',
+        file_name = QtWidgets.QFileDialog.getSaveFileName(self, 'File name',
+                                                          '/home/p23user/sardanaMacros/scripts/',
                                                           "Script Files (*.scr)")
 
         if file_name[0]:
+            f_name = file_name[0]
+            if not f_name.endswith('.scr'):
+                f_name += '.scr'
+
             self.parse_command()
-            with open(file_name[0], 'w') as f_out:
+            with open(f_name, 'w') as f_out:
                 f_out.write(self.command + '\n')
                 f_out.write(';'.join([str(val) for val in self.starts]) + '\n')
                 f_out.write(';'.join([str(val) for val in self.stops])+ '\n')
@@ -376,14 +379,13 @@ class HKLViewer(QtWidgets.QMainWindow):
                 motor_cmd = ''
                 for name in self.motors:
                     if getattr(self._ui, f'chk_{name}_exclude').isChecked():
-                        motor_cmd += 'exclude;'
+                        motor_cmd += f'{name}:exclude;'
                     elif getattr(self._ui, f'chk_{name}_lin').isChecked():
-                        motor_cmd += 'linear;'
+                        motor_cmd += f'{name}:linear;'
                     else:
-                        motor_cmd += 'free;'
+                        motor_cmd += f'{name}:free;'
 
-                motor_cmd.strip(';')
-                f_out.write(motor_cmd + '\n')
+                f_out.write(motor_cmd.strip(';') + '\n')
 
     # ----------------------------------------------------------------------
     def load_script(self):

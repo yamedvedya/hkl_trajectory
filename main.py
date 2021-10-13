@@ -18,7 +18,8 @@ from src.main_window import HKLViewer
 def main():
     parser = OptionParser()
 
-    parser.add_option("-s", "--server", dest="diff", default='hasep23swt01:10000/controller/diffrac6cp23/e6c', help="DiffracDevice")
+    parser.add_option("-s", "--server", dest="diff", default='hasep23oh:10000/controller/diffrac6cp23/e6c',
+                      help="DiffracDevice")
 
     (options, _) = parser.parse_args()
 
