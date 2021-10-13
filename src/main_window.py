@@ -3,8 +3,6 @@
 APP_NAME = "HKL_Viewer"
 
 import os
-import logging
-import psutil
 import PyTango
 
 import numpy as np
@@ -43,11 +41,21 @@ class HKLViewer(QtWidgets.QMainWindow):
             name, address = motor.split('  ')
             self.reciprocal_motors[name.split('_')[1]] = address.strip('(tango://').strip(')')
 
-        self.motors = None
+        self.motors = [name.split('  ')[0] for name in PyTango.DeviceProxy(self.diffrac).motorlist]
+        #TODO TEMP
+        self.motors = ['omega_t', 'mu', 'omega', 'chi', 'phi', 'gamma', 'delta']
+
         self.real_trajectory = None
 
         self.original_plots = {}
         self.reduce_plots = {}
+
+        self.command = None
+        self.starts = None
+        self.stops = None
+        self.nb_steps = None
+        self.orig_steps = None
+        self.integ_time = None
 
         self.labels = {}
         for plot in ['h', 'k', 'l', 'omega_t', 'omega', 'phi', 'chi', 'mu', 'gamma', 'delta']:
@@ -65,9 +73,9 @@ class HKLViewer(QtWidgets.QMainWindow):
             getattr(self._ui, f'gv_{plot}').setCentralItem(plot_item)
             getattr(self._ui, f'gv_{plot}').setRenderHints(getattr(self._ui, f'gv_{plot}').renderHints())
 
-        self.sync_slider('hkl_grid')
-        self.sync_slider('min_move')
-        self.sync_slider('lin_threshold')
+        self.sb_to_slider('hkl_grid')
+        self.sb_to_slider('min_move')
+        self.sb_to_slider('lin_threshold')
 
         for ui in ['omega_t', 'omega', 'phi', 'chi', 'mu', 'gamma', 'delta']:
             getattr(self._ui, f'chk_{ui}_lin').clicked.connect(self.calculate)
@@ -79,19 +87,23 @@ class HKLViewer(QtWidgets.QMainWindow):
         self._ui.sl_min_move.valueChanged.connect(lambda: self.slider_to_sb('min_move'))
         self._ui.sl_lin_threshold.valueChanged.connect(lambda: self.slider_to_sb('lin_threshold'))
 
-        self._ui.sb_hkl_grid.valueChanged.connect(lambda: self.sync_slider('hkl_grid'))
-        self._ui.sb_min_move.valueChanged.connect(lambda: self.sync_slider('min_move'))
-        self._ui.sb_lin_threshold.valueChanged.connect(lambda: self.sync_slider('lin_threshold'))
+        self._ui.sb_hkl_grid.valueChanged.connect(lambda: self.sb_to_slider('hkl_grid'))
+        self._ui.sb_min_move.valueChanged.connect(lambda: self.sb_to_slider('min_move'))
+        self._ui.sb_lin_threshold.valueChanged.connect(lambda: self.sb_to_slider('lin_threshold'))
 
         self._ui.sl_round.valueChanged.connect(lambda: self.sync_round('sl'))
         self._ui.sb_round.valueChanged.connect(lambda: self.sync_round('sb'))
 
         self._ui.cmd_calculate.clicked.connect(self.start)
+        self._ui.cmd_save_script.clicked.connect(self.save_script)
+        self._ui.cmd_load_script.clicked.connect(self.load_script)
 
         self.reload_real = True
 
     # ----------------------------------------------------------------------
     def block_signals(self, flag):
+        self._ui.le_command.blockSignals(flag)
+
         self._ui.sl_hkl_grid.blockSignals(flag)
         self._ui.sl_min_move.blockSignals(flag)
         self._ui.sl_lin_threshold.blockSignals(flag)
@@ -102,6 +114,10 @@ class HKLViewer(QtWidgets.QMainWindow):
 
         self._ui.sl_round.blockSignals(flag)
         self._ui.sb_round.blockSignals(flag)
+
+        for name in self.motors:
+            getattr(self._ui, f'chk_{name}_exclude').blockSignals(flag)
+            getattr(self._ui, f'chk_{name}_lin').blockSignals(flag)
 
     # ----------------------------------------------------------------------
     def sync_round(self, source):
@@ -123,7 +139,7 @@ class HKLViewer(QtWidgets.QMainWindow):
         self.block_signals(False)
 
     # ----------------------------------------------------------------------
-    def sync_slider(self, name):
+    def sb_to_slider(self, name):
         self.block_signals(True)
         value = np.log(getattr(self._ui, f'sb_{name}').value())
         min = np.log(getattr(self._ui, f'sb_{name}').minimum())
@@ -157,7 +173,13 @@ class HKLViewer(QtWidgets.QMainWindow):
         return PyTango.DeviceProxy(self.diffrac).computehkl
 
     # ----------------------------------------------------------------------
-    def get_real_coordinates(self):
+    def parse_command(self):
+        self.command = None
+        self.starts = None
+        self.stops = None
+        self.nb_steps = None
+        self.orig_steps = None
+        self.integ_time = None
 
         command_tokens = self._ui.le_command.text().split()
         if not command_tokens:
@@ -167,56 +189,67 @@ class HKLViewer(QtWidgets.QMainWindow):
         elif len(command_tokens) < 5:
             self.report_error('Not enough input!')
 
+        self.command = command_tokens[0].strip('scan').strip('c')
+
+        self.starts = []
+        self.stops = []
+
+        if 'h' in self.command:
+            self.starts.append(float(command_tokens[1]))
+            self.stops.append(float(command_tokens[2]))
+        elif 'k' in self.command:
+            if 'hkl' in self.command:
+                start_ind = 3
+                stop_ind = 4
+            else:
+                start_ind = 1
+                stop_ind = 2
+            self.starts.append(float(command_tokens[start_ind]))
+            self.stops.append(float(command_tokens[stop_ind]))
+        elif 'h' in self.command:
+            if 'hkl' in self.command:
+                start_ind = 5
+                stop_ind = 6
+            else:
+                start_ind = 1
+                stop_ind = 2
+            self.starts.append(float(command_tokens[start_ind]))
+            self.stops.append(float(command_tokens[stop_ind]))
+
+        self.integ_time = float(command_tokens[-1])
+        self.orig_steps = int(command_tokens[-2])
+
+    # ----------------------------------------------------------------------
+    def get_real_coordinates(self):
+
+        self.parse_command()
+
         hkl_grid = self._ui.sb_hkl_grid.value()
 
-        command = command_tokens[0].strip('scan').strip('c')
-        integration = float(command_tokens[-1])
-
-        n_steps = int(command_tokens[-2])
-        if 'hkl' in command:
-            for ind in range(3):
-                start = float(command_tokens[ind*2 + 1])
-                stop = float(command_tokens[ind*2 + 2])
-                n_steps = max(n_steps, int(np.ceil(np.abs(stop-start)/hkl_grid)) + 1)
-        else:
-            n_steps = max(n_steps, int(np.ceil(np.abs(float(command_tokens[2]) - float(command_tokens[1]))/hkl_grid))+1)
+        self.nb_steps = self.orig_steps
+        for start, stop in zip(self.starts, self.stops):
+            self.nb_steps = max(self.nb_steps, int(np.ceil(np.abs(stop-start)/hkl_grid)) + 1)
 
         positions = {}
         for name, address in self.reciprocal_motors.items():
             positions[name] = PyTango.DeviceProxy(address).position
 
-        hkl_trajectory = np.ones((n_steps, 3))
+        hkl_trajectory = np.ones((self.nb_steps, 3))
         hkl_trajectory[:, 0] = positions['h']
         hkl_trajectory[:, 1] = positions['k']
         hkl_trajectory[:, 2] = positions['l']
 
-        if 'h' in command:
-            hkl_trajectory[:, 0] = np.linspace(float(command_tokens[1]), float(command_tokens[2]), n_steps)
-            if 'd' in command:
-                hkl_trajectory[:, 0] += positions['h']
-        elif 'k' in command:
-            if 'hkl' in command:
-                hkl_trajectory[:, 1] = np.linspace(float(command_tokens[3]), float(command_tokens[4]), n_steps)
+        for ind, (start, stop) in enumerate(zip(self.starts, self.stops)):
+            trajectory = np.linspace(start, stop, self.nb_steps)
+            if 'd' in self.command:
+                hkl_trajectory[:, ind] += trajectory
             else:
-                hkl_trajectory[:, 1] = np.linspace(float(command_tokens[1]), float(command_tokens[2]), n_steps)
-            if 'd' in command:
-                hkl_trajectory[:, 1] += positions['k']
-        elif 'h' in command:
-            if 'hkl' in command:
-                hkl_trajectory[:, 2] = np.linspace(float(command_tokens[5]), float(command_tokens[6]), n_steps)
-            else:
-                hkl_trajectory[:, 2] = np.linspace(float(command_tokens[1]), float(command_tokens[2]), n_steps)
-            if 'd' in command:
-                hkl_trajectory[:, 2] += positions['l']
+                hkl_trajectory[:, ind] = trajectory
 
         for ind, name in enumerate(['h', 'k', 'l']):
             self.original_plots[name].setData(np.arange(len(hkl_trajectory[:, ind])), hkl_trajectory[:, ind])
 
-        self.motors = [name.split('  ')[0] for name in PyTango.DeviceProxy(self.diffrac).motorlist]
-        #TODO TEMP
-        self.motors = ['omega_t', 'mu', 'omega', 'chi', 'phi', 'gamma', 'delta']
-
-        self.real_trajectory = np.zeros((len(self.motors), n_steps))
+        self.real_trajectory = np.zeros((len(self.motors), self.nb_steps))
         for step, (h, k, l) in enumerate(hkl_trajectory):
             self.real_trajectory[:, step] = self.get_positions_for_hkl([h, k, l])
 
@@ -230,7 +263,7 @@ class HKLViewer(QtWidgets.QMainWindow):
     # ----------------------------------------------------------------------
     def calculate(self):
 
-        if self.motors is None and self.real_trajectory is None:
+        if self.real_trajectory is None:
             return
 
         trajectories = []
@@ -243,7 +276,6 @@ class HKLViewer(QtWidgets.QMainWindow):
             reduced_trajectory = np.vstack((np.array([0,               trajectory[0]]),
                                             np.array([len(trajectory), trajectory[0]])))
 
-            # check if there is a movement:
             if np.any(np.abs(displacement) > self._ui.sb_min_move.value()):
                 motors_with_movement[ind] = True
 
@@ -323,9 +355,83 @@ class HKLViewer(QtWidgets.QMainWindow):
             return True
 
     # ----------------------------------------------------------------------
-    def report_error(self, text, informative_text='', detailed_text=''):
+    def save_script(self):
+        file_name = QtWidgets.QFileDialog.getSaveFileName(self, 'File name', '/home/p23user/sardanaMacros/script',
+                                                          "Script Files (*.scr)")
 
-        self.log.error("Error: {}, {}, {} ".format(text, informative_text, detailed_text))
+        if file_name[0]:
+            self.parse_command()
+            with open(file_name[0], 'w') as f_out:
+                f_out.write(self.command + '\n')
+                f_out.write(';'.join([str(val) for val in self.starts]) + '\n')
+                f_out.write(';'.join([str(val) for val in self.stops])+ '\n')
+                f_out.write(str(self.orig_steps) + '\n')
+                f_out.write(str(self.integ_time) + '\n')
+
+                f_out.write(';'.join([str(self._ui.sb_hkl_grid.value()),
+                                      str(self._ui.sb_min_move.value()),
+                                      str(self._ui.sb_lin_threshold.value()),
+                                      str(self._ui.sb_round.value())]) + '\n')
+
+                motor_cmd = ''
+                for name in self.motors:
+                    if getattr(self._ui, f'chk_{name}_exclude').isChecked():
+                        motor_cmd += 'exclude;'
+                    elif getattr(self._ui, f'chk_{name}_lin').isChecked():
+                        motor_cmd += 'linear;'
+                    else:
+                        motor_cmd += 'free;'
+
+                motor_cmd.strip(';')
+                f_out.write(motor_cmd + '\n')
+
+    # ----------------------------------------------------------------------
+    def load_script(self):
+        file_name = QtWidgets.QFileDialog.getOpenFileName(self, 'Script File', '/home/p23user/sardanaMacros/script',
+                                                          "Script Files (*.scr)")
+
+        if file_name[0]:
+            self.block_signals(True)
+            with open(file_name[0], 'r') as f_in:
+                cmd = f_in.readline().strip('\n') + 'cscan '
+
+                starts = np.array([float(pos) for pos in f_in.readline().strip('\n').split(';')], dtype='d')
+                stops = np.array([float(pos) for pos in f_in.readline().strip('\n').split(';')], dtype='d')
+                for start, stop in zip(starts, stops):
+                    cmd += f'{start} {stop} '
+
+                cmd += f_in.readline().strip('\n') + ' '
+                cmd += f_in.readline().strip('\n')
+
+                self._ui.le_command.setText(cmd)
+
+                constants = f_in.readline().strip('\n').split(';')
+
+                self._ui.sb_hkl_grid.setValue(float(constants[0]))
+                self._ui.sb_min_move.setValue(float(constants[1]))
+                self._ui.sb_lin_threshold.setValue(float(constants[2]))
+
+                self.sb_to_slider('hkl_grid')
+                self.sb_to_slider('min_move')
+                self.sb_to_slider('lin_threshold')
+
+                self._ui.sl_round.setValue(float(constants[3]))
+                self._ui.sl_round.setValue(float(constants[3]))
+
+                states = f_in.readline().strip('\n').split(';')
+                for name, state in zip(self.motors, states):
+                    getattr(self._ui, f'chk_{name}_exclude').setChecked(False)
+                    getattr(self._ui, f'chk_{name}_lin').setChecked(False)
+                    if state == 'exclude':
+                        getattr(self._ui, f'chk_{name}_exclude').setChecked(True)
+                    elif state == 'linear':
+                        getattr(self._ui, f'chk_{name}_lin').setChecked(True)
+
+            self.block_signals(False)
+            # self.get_real_coordinates()
+
+    # ----------------------------------------------------------------------
+    def report_error(self, text, informative_text='', detailed_text=''):
 
         self.msg = QtWidgets.QMessageBox()
         self.msg.setModal(False)
@@ -339,20 +445,10 @@ class HKLViewer(QtWidgets.QMainWindow):
         self.msg.show()
 
     # ----------------------------------------------------------------------
-    def _close_me(self):
-        self.log.info("Closing the app...")
-        self._save_ui_settings()
-
-    # ----------------------------------------------------------------------
-    def _exit(self):
-        self._close_me()
-        QtWidgets.QApplication.quit()
-
-    # ----------------------------------------------------------------------
     def closeEvent(self, event):
         """
         """
-        self._close_me()
+        self._save_ui_settings()
         event.accept()
 
     # ----------------------------------------------------------------------
